@@ -849,8 +849,9 @@ void lim_reset_deferred_msg_q(tpAniSirGlobal pMac)
 
 uint8_t lim_write_deferred_msg_q(tpAniSirGlobal mac_ctx, tpSirMsgQ lim_msg)
 {
-	lim_log(mac_ctx, LOG1,
-		FL("Queue a deferred message (size %d, write %d) - type 0x%x "),
+	uint8_t type, subtype;
+
+	pe_debug("Queue a deferred message size: %d write: %d - type: 0x%x",
 		mac_ctx->lim.gLimDeferredMsgQ.size,
 		mac_ctx->lim.gLimDeferredMsgQ.write,
 		lim_msg->type);
@@ -886,6 +887,13 @@ uint8_t lim_write_deferred_msg_q(tpAniSirGlobal mac_ctx, tpSirMsgQ lim_msg)
 			mac_ctx->lim.gLimSmeState,
 			mac_ctx->lim.gLimMlmState,
 			mac_ctx->lim.gLimAddtsSent);
+
+	if (SIR_BB_XPORT_MGMT_MSG == lim_msg->type) {
+		lim_util_get_type_subtype(lim_msg->bodyptr,
+					&type, &subtype);
+		pe_debug(" Deferred managment type %d subtype %d ",
+			type, subtype);
+	}
 
 	/*
 	 * To prevent the deferred Q is full of management frames, only give
@@ -1125,14 +1133,10 @@ uint8_t lim_is_null_ssid(tSirMacSSid *ssid)
 	/* If the first charactes is space, then check if all
 	 * characters in SSID are spaces to consider it as NULL SSID
 	 */
-	//#ifdef VENDOR_EDIT
-	//if ((ASCII_SPACE_CHARACTER == ssid->ssId[0]) &&
-	//	(ssid->length == 1)) {
-	//#else
-	if (0) {
-	//#endif /* VENDOR_EDIT */
-		fnull_ssid = true;
-		return fnull_ssid;
+	if ((ASCII_SPACE_CHARACTER == ssid->ssId[0]) &&
+		(ssid->length == 1)) {
+			fnull_ssid = true;
+			return fnull_ssid;
 	} else {
 		/* check if all the charactes in SSID are NULL */
 		ssid_len = ssid->length;
@@ -4607,6 +4611,16 @@ void lim_update_sta_run_time_ht_switch_chnl_params(tpAniSirGlobal pMac,
 		return;
 	}
 
+	if (psessionEntry->ch_switch_in_progress == true) {
+		pe_debug("ch switch is in progress, ignore HT IE BW update");
+		return;
+	}
+
+	if (!pHTInfo->primaryChannel) {
+		pe_debug("Ignore as primary channel is 0 in HT info");
+		return;
+	}
+
 	if (psessionEntry->htSecondaryChannelOffset !=
 	    (uint8_t) pHTInfo->secondaryChannelOffset
 	    || psessionEntry->htRecommendedTxWidthSet !=
@@ -5795,6 +5809,11 @@ void lim_handle_heart_beat_failure_timeout(tpAniSirGlobal mac_ctx)
 			 (psession_entry->currentBssBeaconCnt == 0))) {
 			lim_log(mac_ctx, LOGE, FL("for session:%d "),
 						psession_entry->peSessionId);
+
+			lim_send_deauth_mgmt_frame(mac_ctx,
+				eSIR_MAC_DISASSOC_DUE_TO_INACTIVITY_REASON,
+				psession_entry->bssId, psession_entry, false);
+
 			/*
 			 * AP did not respond to Probe Request.
 			 * Tear down link with it.
@@ -6602,8 +6621,14 @@ static QDF_STATUS lim_send_ie(tpAniSirGlobal mac_ctx, uint32_t sme_session_id,
  *
  * Return: true if enabled and false otherwise
  */
-static inline bool lim_get_rx_ldpc(tpAniSirGlobal mac_ctx, uint8_t ch)
+static inline bool lim_get_rx_ldpc(tpAniSirGlobal mac_ctx, enum channel_enum ch)
 {
+	if (ch >= NUM_CHANNELS) {
+		lim_log(mac_ctx, LOGE,
+			FL("invalid number of channels, disable rx ldpc"));
+		return false;
+	}
+
 	if (mac_ctx->roam.configParam.rxLdpcEnable &&
 		wma_is_rx_ldpc_supported_for_channel(CDS_CHANNEL_NUM(ch)))
 		return true;
@@ -6918,6 +6943,7 @@ void lim_update_extcap_struct(tpAniSirGlobal mac_ctx,
 	uint8_t *buf, tDot11fIEExtCap *dst)
 {
 	uint8_t out[DOT11F_IE_EXTCAP_MAX_LEN];
+	uint32_t status;
 
 	if (NULL == buf) {
 		lim_log(mac_ctx, LOGE, FL("Invalid Buffer Address"));
@@ -6938,9 +6964,10 @@ void lim_update_extcap_struct(tpAniSirGlobal mac_ctx,
 	qdf_mem_set((uint8_t *)&out[0], DOT11F_IE_EXTCAP_MAX_LEN, 0);
 	qdf_mem_copy(&out[0], &buf[2], buf[1]);
 
-	if (DOT11F_PARSE_SUCCESS != dot11f_unpack_ie_ext_cap(mac_ctx, &out[0],
-					buf[1], dst))
-		lim_log(mac_ctx, LOGE, FL("dot11f_unpack Parse Error "));
+	status = dot11f_unpack_ie_ext_cap(mac_ctx, &out[0],
+					buf[1], dst);
+	if (DOT11F_PARSE_SUCCESS != status)
+		pe_err("dot11f_unpack Parse Error %d", status);
 }
 
 /**
@@ -7480,4 +7507,99 @@ void lim_decrement_pending_mgmt_count(tpAniSirGlobal mac_ctx)
 	}
 	mac_ctx->sys.sys_bbt_pending_mgmt_count--;
 	qdf_spin_unlock(&mac_ctx->sys.bbt_mgmt_lock);
+}
+
+QDF_STATUS lim_util_get_type_subtype(void *pkt, uint8_t *type,
+						uint8_t *subtype)
+{
+	cds_pkt_t *cds_pkt;
+	QDF_STATUS status;
+	tpSirMacMgmtHdr hdr;
+	uint8_t *rxpktinfor;
+
+	cds_pkt = (cds_pkt_t *) pkt;
+	if (!cds_pkt) {
+		pe_err("NULL packet received");
+		return QDF_STATUS_E_FAILURE;
+	}
+	status =
+		wma_ds_peek_rx_packet_info(cds_pkt, (void *)&rxpktinfor, false);
+	if (!QDF_IS_STATUS_SUCCESS(status)) {
+		pe_err("Failed extract cds packet. status %d", status);
+		return QDF_STATUS_E_FAILURE;
+	}
+
+	hdr = WMA_GET_RX_MAC_HEADER(rxpktinfor);
+	if (hdr->fc.type == SIR_MAC_MGMT_FRAME) {
+		pe_debug("RxBd: %p mHdr: %p Type: %d Subtype: %d  SizesFC: %zu",
+		  rxpktinfor, hdr, hdr->fc.type, hdr->fc.subType,
+		  sizeof(tSirMacFrameCtl));
+		*type = hdr->fc.type;
+		*subtype = hdr->fc.subType;
+	} else {
+		pe_err("Not a managment packet type %d", hdr->fc.type);
+		return QDF_STATUS_E_INVAL;
+	}
+	return QDF_STATUS_SUCCESS;
+}
+
+uint8_t lim_get_min_session_txrate(tpPESession session)
+{
+	enum rateid rid = RATEID_DEFAULT;
+	uint8_t min_rate = SIR_MAC_RATE_54, curr_rate, i;
+	tSirMacRateSet *rateset = &session->rateSet;
+
+	if (!session)
+		return rid;
+
+	for (i = 0; i < rateset->numRates; i++) {
+		/* Ignore MSB - set to indicate basic rate */
+		curr_rate = rateset->rate[i] & 0x7F;
+		min_rate =  (curr_rate < min_rate) ? curr_rate : min_rate;
+	}
+	pe_debug("supported min_rate: %0x(%d)", min_rate, min_rate);
+
+	switch (min_rate) {
+	case SIR_MAC_RATE_1:
+		rid = RATEID_1MBPS;
+		break;
+	case SIR_MAC_RATE_2:
+		rid = RATEID_2MBPS;
+		break;
+	case SIR_MAC_RATE_5_5:
+		rid = RATEID_5_5MBPS;
+		break;
+	case SIR_MAC_RATE_11:
+		rid = RATEID_11MBPS;
+		break;
+	case SIR_MAC_RATE_6:
+		rid = RATEID_6MBPS;
+		break;
+	case SIR_MAC_RATE_9:
+		rid = RATEID_9MBPS;
+		break;
+	case SIR_MAC_RATE_12:
+		rid = RATEID_12MBPS;
+		break;
+	case SIR_MAC_RATE_18:
+		rid = RATEID_18MBPS;
+		break;
+	case SIR_MAC_RATE_24:
+		rid = RATEID_24MBPS;
+		break;
+	case SIR_MAC_RATE_36:
+		rid = RATEID_36MBPS;
+		break;
+	case SIR_MAC_RATE_48:
+		rid = RATEID_48MBPS;
+		break;
+	case SIR_MAC_RATE_54:
+		rid = RATEID_54MBPS;
+		break;
+	default:
+		rid = RATEID_DEFAULT;
+		break;
+	}
+
+	return rid;
 }

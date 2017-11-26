@@ -118,14 +118,14 @@ lim_process_disassoc_frame(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 	if (LIM_IS_STA_ROLE(psessionEntry) &&
 		((eLIM_SME_WT_DISASSOC_STATE == psessionEntry->limSmeState) ||
 		(eLIM_SME_WT_DEAUTH_STATE == psessionEntry->limSmeState))) {
-		if (!(pMac->lim.disassocMsgCnt & 0xF)) {
-			pr_info("received Disassoc frame in %s"
+		if (!(psessionEntry->disassocmsgcnt & 0xF)) {
+			pe_info("received Disassoc frame in %s"
 				"(already processing previously received Disassoc frame)"
 				"Dropping this.. Disassoc Failed %d",
-						lim_sme_state_str(psessionEntry->limSmeState),
-					   ++pMac->lim.disassocMsgCnt);
+				lim_sme_state_str(psessionEntry->limSmeState),
+					   ++psessionEntry->disassocmsgcnt);
 		} else {
-			pMac->lim.disassocMsgCnt++;
+			psessionEntry->disassocmsgcnt++;
 		}
 		return;
 	}
@@ -178,6 +178,16 @@ lim_process_disassoc_frame(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 	       )
 	lim_diag_event_report(pMac, WLAN_PE_DIAG_DISASSOC_FRAME_EVENT,
 		psessionEntry, 0, reasonCode);
+
+	if (pMac->roam.configParam.enable_fatal_event &&
+		(reasonCode != eSIR_MAC_UNSPEC_FAILURE_REASON &&
+		reasonCode != eSIR_MAC_DEAUTH_LEAVING_BSS_REASON &&
+		reasonCode != eSIR_MAC_DISASSOC_LEAVING_BSS_REASON)) {
+		cds_flush_logs(WLAN_LOG_TYPE_FATAL,
+				WLAN_LOG_INDICATOR_HOST_DRIVER,
+				WLAN_LOG_REASON_DISCONNECT,
+				false, false);
+	}
 	/**
 	 * Extract 'associated' context for STA, if any.
 	 * This is maintained by DPH and created by LIM.
@@ -210,9 +220,8 @@ lim_process_disassoc_frame(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 		return;
 	}
 
-	if (pMac->lim.disassocMsgCnt != 0) {
-		pMac->lim.disassocMsgCnt = 0;
-	}
+	if (psessionEntry->disassocmsgcnt != 0)
+		psessionEntry->disassocmsgcnt = 0;
 
 	/** If we are in the Wait for ReAssoc Rsp state */
 	if (lim_is_reassoc_in_progress(pMac, psessionEntry)) {

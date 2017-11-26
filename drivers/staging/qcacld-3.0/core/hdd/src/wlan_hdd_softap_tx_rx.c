@@ -219,9 +219,12 @@ static struct sk_buff *hdd_skb_orphan(hdd_adapter_t *pAdapter,
 		struct sk_buff *skb) {
 
 	struct sk_buff *nskb;
-	nskb = skb_unshare(skb, GFP_ATOMIC);
+	hdd_context_t *hdd_ctx = pAdapter->pHddCtx;
 
-	if (nskb == skb) {
+	hdd_skb_fill_gso_size(pAdapter->dev, skb);
+
+	nskb = skb_unshare(skb, GFP_ATOMIC);
+	if (unlikely(hdd_ctx->config->tx_orphan_enable) && (nskb == skb)) {
 		/*
 		 * For UDP packets we want to orphan the packet to allow the app
 		 * to send more packets. The flow would ultimately be controlled
@@ -257,6 +260,8 @@ static int __hdd_softap_hard_start_xmit(struct sk_buff *skb,
 	uint8_t STAId;
 
 	++pAdapter->hdd_stats.hddTxRxStats.txXmitCalled;
+	pAdapter->hdd_stats.hddTxRxStats.cont_txtimeout_cnt = 0;
+
 	/* Prevent this function from being called during SSR since TL
 	 * context may not be reinitialized at this time which may
 	 * lead to a crash.
@@ -462,30 +467,6 @@ int hdd_softap_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return ret;
 }
 
-#ifdef FEATURE_WLAN_DIAG_SUPPORT
-/**
- * hdd_wlan_datastall_sap_event()- Send SAP datastall information
- *
- * This Function send send SAP datastall diag event
- *
- * Return: void.
- */
-static void hdd_wlan_datastall_sap_event(void)
-{
-	WLAN_HOST_DIAG_EVENT_DEF(sap_data_stall,
-					struct host_event_wlan_datastall);
-	qdf_mem_zero(&sap_data_stall, sizeof(sap_data_stall));
-	sap_data_stall.reason = SOFTAP_TX_TIMEOUT;
-	WLAN_HOST_DIAG_EVENT_REPORT(&sap_data_stall,
-						EVENT_WLAN_SOFTAP_DATASTALL);
-}
-#else
-static inline void hdd_wlan_datastall_sap_event(void)
-{
-
-}
-#endif
-
 /**
  * __hdd_softap_tx_timeout() - TX timeout handler
  * @dev: pointer to network device
@@ -532,7 +513,22 @@ static void __hdd_softap_tx_timeout(struct net_device *dev)
 	ol_tx_dump_flow_pool_info();
 	QDF_TRACE(QDF_MODULE_ID_HDD_DATA, QDF_TRACE_LEVEL_INFO,
 			"carrier state: %d", netif_carrier_ok(dev));
-	hdd_wlan_datastall_sap_event();
+
+	++adapter->hdd_stats.hddTxRxStats.tx_timeout_cnt;
+	++adapter->hdd_stats.hddTxRxStats.cont_txtimeout_cnt;
+
+	if (adapter->hdd_stats.hddTxRxStats.cont_txtimeout_cnt >
+	    HDD_TX_STALL_THRESHOLD) {
+		QDF_TRACE(QDF_MODULE_ID_HDD_DATA, QDF_TRACE_LEVEL_ERROR,
+			  "Detected data stall due to continuous TX timeouts");
+		adapter->hdd_stats.hddTxRxStats.cont_txtimeout_cnt = 0;
+		if (hdd_ctx->config->enable_data_stall_det)
+			ol_txrx_post_data_stall_event(
+					DATA_STALL_LOG_INDICATOR_HOST_DRIVER,
+					DATA_STALL_LOG_HOST_SOFTAP_TX_TIMEOUT,
+					0xFF, 0XFF,
+					DATA_STALL_LOG_RECOVERY_TRIGGER_PDR);
+	}
 }
 
 /**

@@ -1310,9 +1310,6 @@ __lim_process_sm_power_save_update(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 			FL
 				("There were warnings while unpacking a SMPower Save update (0x%08x, %d bytes):"),
 			nStatus, frameLen);
-		PELOG2(sir_dump_buf
-			       (pMac, SIR_DBG_MODULE_ID, LOG2, pBody, frameLen);
-		       )
 	}
 
 	lim_log(pMac, LOGW,
@@ -1398,8 +1395,6 @@ __lim_process_radio_measure_request(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 		lim_log(pMac, LOGW,
 			FL("There were warnings while unpacking a Radio Measure request (0x%08x, %d bytes):"),
 			nStatus, frameLen);
-		PELOG2(sir_dump_buf
-		       (pMac, SIR_DBG_MODULE_ID, LOG2, pBody, frameLen);)
 	}
 	/* Call rrm function to handle the request. */
 
@@ -1444,9 +1439,6 @@ __lim_process_link_measurement_req(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 			FL
 				("There were warnings while unpacking a Link Measure request (0x%08x, %d bytes):"),
 			nStatus, frameLen);
-		PELOG2(sir_dump_buf
-			       (pMac, SIR_DBG_MODULE_ID, LOG2, pBody, frameLen);
-		       )
 	}
 	/* Call rrm function to handle the request. */
 
@@ -1500,9 +1492,6 @@ __lim_process_neighbor_report(tpAniSirGlobal pMac, uint8_t *pRxPacketInfo,
 			FL
 				("There were warnings while unpacking a Neighbor report response (0x%08x, %d bytes):"),
 			nStatus, frameLen);
-		PELOG2(sir_dump_buf
-			       (pMac, SIR_DBG_MODULE_ID, LOG2, pBody, frameLen);
-		       )
 	}
 	/* Call rrm function to handle the request. */
 	rrm_process_neighbor_report_response(pMac, pFrm, psessionEntry);
@@ -2007,6 +1996,13 @@ void lim_process_action_frame(tpAniSirGlobal mac_ctx,
 
 			mac_hdr = WMA_GET_RX_MAC_HEADER(rx_pkt_info);
 			frame_len = WMA_GET_RX_PAYLOAD_LEN(rx_pkt_info);
+			if (frame_len < sizeof(pub_action)) {
+				lim_log(mac_ctx, LOG1,
+					FL("Received action frame of invalid len %d"),
+					frame_len);
+				return;
+			}
+
 			/* Check if it is a P2P public action frame. */
 			if (!qdf_mem_cmp(pub_action->Oui, p2p_oui, 4)) {
 				/*
@@ -2218,6 +2214,12 @@ void lim_process_action_frame_no_session(tpAniSirGlobal pMac, uint8_t *pBd)
 
 			pHdr = WMA_GET_RX_MAC_HEADER(pBd);
 			frameLen = WMA_GET_RX_PAYLOAD_LEN(pBd);
+			if (frameLen < sizeof(pActionHdr)) {
+				lim_log(pMac, LOG1,
+					FL("Received action frame of invalid len %d"),
+					frameLen);
+				return;
+			}
 
 			/* Check if it is a P2P public action frame. */
 			if (!qdf_mem_cmp(pActionHdr->Oui, P2POui, 4)) {

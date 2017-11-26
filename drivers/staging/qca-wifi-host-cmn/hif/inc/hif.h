@@ -93,9 +93,10 @@ typedef void *hif_handle_t;
 #define TARGET_TYPE_AR6320V3    16
 /* For Tufello1.0 target_reg_tbl ID*/
 #define TARGET_TYPE_QCA9377V1   17
+#endif /* CONFIG_WIN */
+
 /* For Adrastea target */
 #define TARGET_TYPE_ADRASTEA     19
-#endif
 
 #ifdef IPA_OFFLOAD
 #define DMA_COHERENT_MASK_IPA_VER_3_AND_ABOVE   37
@@ -358,6 +359,7 @@ struct hif_driver_state_callbacks {
 	bool (*is_recovery_in_progress)(void *context);
 	bool (*is_load_unload_in_progress)(void *context);
 	bool (*is_driver_unloading)(void *context);
+	bool (*is_target_ready)(void *context);
 };
 
 /* This API detaches the HTC layer from the HIF device */

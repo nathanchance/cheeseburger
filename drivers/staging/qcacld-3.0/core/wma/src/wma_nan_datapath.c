@@ -679,6 +679,13 @@ static int wma_ndp_end_indication_event_handler(void *handle,
 	WMA_LOGD(FL("number of ndp instances = %d"),
 		event->num_ndp_end_indication_list);
 
+	if (event->num_ndp_end_indication_list > ((WMI_SVC_MSG_MAX_SIZE -
+	    sizeof(*ndp_event_buf)) / sizeof(ndp_event_buf->ndp_map[0]))) {
+		WMA_LOGE("%s: excess data received from fw num_ndp_end_indication_list %d",
+			 __func__, event->num_ndp_end_indication_list);
+		return -EINVAL;
+	}
+
 	buf_size = sizeof(*ndp_event_buf) + event->num_ndp_end_indication_list *
 			sizeof(ndp_event_buf->ndp_map[0]);
 	ndp_event_buf = qdf_mem_malloc(buf_size);
@@ -854,10 +861,12 @@ void wma_ndp_unregister_all_event_handlers(tp_wma_handle wma_handle)
 void wma_ndp_add_wow_wakeup_event(tp_wma_handle wma_handle,
 					uint8_t vdev_id)
 {
-	uint32_t event_bitmap;
-	event_bitmap = (1 << WOW_NAN_DATA_EVENT);
+	uint32_t event_bitmap[WMI_WOW_MAX_EVENT_BM_LEN] = {0};
+
+	wma_set_wow_event_bitmap(WOW_NAN_DATA_EVENT, WMI_WOW_MAX_EVENT_BM_LEN,
+				 event_bitmap);
 	WMA_LOGI("NDI specific default wake up event 0x%x vdev id %d",
-		event_bitmap, vdev_id);
+		 event_bitmap[0], vdev_id);
 	wma_add_wow_wakeup_event(wma_handle, vdev_id, event_bitmap, true);
 }
 

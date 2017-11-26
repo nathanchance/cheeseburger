@@ -891,18 +891,7 @@ struct CE_handle *ce_init(struct hif_softc *scn,
 				 */
 				HIF_ERROR("%s: dest ring has no mem",
 					  __func__);
-				if (malloc_src_ring) {
-					qdf_mem_free(CE_state->src_ring);
-					CE_state->src_ring = NULL;
-					malloc_src_ring = false;
-				}
-				if (malloc_CE_state) {
-					/* allocated CE_state locally */
-					scn->ce_id_to_state[CE_id] = NULL;
-					qdf_mem_free(CE_state);
-					malloc_CE_state = false;
-				}
-				return NULL;
+				goto error_no_dma_mem;
 			}
 
 			dest_ring = CE_state->dest_ring =
@@ -1472,7 +1461,7 @@ static inline void hif_ce_do_recv(struct hif_msg_callbacks *msg_callbacks,
 			rxCompletionHandler(msg_callbacks->Context,
 					netbuf, pipe_info->pipe_num);
 	} else {
-		HIF_ERROR("%s: Invalid Rx msg buf:%p nbytes:%d",
+		HIF_ERROR("%s: Invalid Rx msg buf:%pK nbytes:%d",
 				__func__, netbuf, nbytes);
 		qdf_nbuf_free(netbuf);
 	}
@@ -1576,7 +1565,7 @@ static int hif_completion_thread_startup(struct HIF_CE_state *hif_state)
 		attr = host_ce_config[pipe_num];
 		if (attr.src_nentries) {
 			/* pipe used to send to target */
-			HIF_INFO_MED("%s: pipe_num:%d pipe_info:0x%p",
+			HIF_INFO_MED("%s: pipe_num:%d pipe_info:0x%pK",
 					 __func__, pipe_num, pipe_info);
 			ce_send_cb_register(pipe_info->ce_hdl,
 					    hif_pci_ce_send_done, pipe_info,
@@ -1684,6 +1673,7 @@ static void hif_post_recv_buffers_failure(struct HIF_CE_pipe_info *pipe_info,
 	 */
 	if (bufs_needed_tmp == CE_state->dest_ring->nentries - 1)
 		qdf_sched_work(scn->qdf_dev, &CE_state->oom_allocation_work);
+
 }
 
 
@@ -1778,9 +1768,10 @@ static int hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info)
 
 /*
  * Try to post all desired receive buffers for all pipes.
- * Returns 0 if all desired buffers are posted,
- * non-zero if were were unable to completely
- * replenish receive buffers.
+ * Returns 0 for non fastpath rx copy engine as
+ * oom_allocation_work will be scheduled to recover any
+ * failures, non-zero if unable to completely replenish
+ * receive buffers for fastpath rx Copy engine.
  */
 static int hif_post_recv_buffers(struct hif_softc *scn)
 {
@@ -1799,7 +1790,9 @@ static int hif_post_recv_buffers(struct hif_softc *scn)
 			continue;
 		}
 
-		if (hif_post_recv_buffers_for_pipe(pipe_info)) {
+		if (hif_post_recv_buffers_for_pipe(pipe_info) &&
+			ce_state->htt_rx_data &&
+			scn->fastpath_mode_on) {
 			rv = 1;
 			goto done;
 		}
@@ -1989,7 +1982,7 @@ void hif_ce_stop(struct hif_softc *scn)
 	 * before cleaning up any memory, ensure irq &
 	 * bottom half contexts will not be re-entered
 	 */
-	hif_nointrs(scn);
+	hif_disable_isr(&scn->osc);
 	hif_destroy_oom_work(scn);
 	scn->hif_init_done = false;
 
@@ -2802,11 +2795,16 @@ inline unsigned int hif_get_src_ring_read_index(struct hif_softc *scn,
 	struct CE_attr attr;
 
 	attr = host_ce_config[COPY_ENGINE_ID(CE_ctrl_addr)];
-	if (attr.flags & CE_ATTR_DISABLE_INTR)
+	if (attr.flags & CE_ATTR_DISABLE_INTR) {
 		return CE_SRC_RING_READ_IDX_GET_FROM_DDR(scn, CE_ctrl_addr);
-	else
-		return A_TARGET_READ(scn,
-				(CE_ctrl_addr) + CURRENT_SRRI_ADDRESS);
+	} else {
+		if (TARGET_REGISTER_ACCESS_ALLOW(scn))
+			return A_TARGET_READ(scn,
+					(CE_ctrl_addr) + CURRENT_SRRI_ADDRESS);
+		else
+			return CE_SRC_RING_READ_IDX_GET_FROM_DDR(scn,
+					CE_ctrl_addr);
+	}
 }
 
 /**
@@ -2827,11 +2825,16 @@ inline unsigned int hif_get_dst_ring_read_index(struct hif_softc *scn,
 
 	attr = host_ce_config[COPY_ENGINE_ID(CE_ctrl_addr)];
 
-	if (attr.flags & CE_ATTR_DISABLE_INTR)
+	if (attr.flags & CE_ATTR_DISABLE_INTR) {
 		return CE_DEST_RING_READ_IDX_GET_FROM_DDR(scn, CE_ctrl_addr);
-	else
-		return A_TARGET_READ(scn,
-				(CE_ctrl_addr) + CURRENT_DRRI_ADDRESS);
+	} else {
+		if (TARGET_REGISTER_ACCESS_ALLOW(scn))
+			return A_TARGET_READ(scn,
+					(CE_ctrl_addr) + CURRENT_DRRI_ADDRESS);
+		else
+			return CE_DEST_RING_READ_IDX_GET_FROM_DDR(scn,
+					CE_ctrl_addr);
+	}
 }
 
 /**

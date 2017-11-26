@@ -1243,6 +1243,7 @@ typedef struct tagCsrConfigParam {
 	uint8_t scanCfgAgingTime;
 	uint8_t enableTxLdpc;
 	uint8_t enableRxLDPC;
+	uint8_t disable_high_ht_mcs_2x2;
 	uint8_t max_amsdu_num;
 	uint8_t nSelect5GHzMargin;
 	uint8_t isCoalesingInIBSSAllowed;
@@ -1318,7 +1319,12 @@ typedef struct tagCsrConfigParam {
 	bool qcn_ie_support;
 	uint8_t fils_max_chan_guard_time;
 	uint16_t pkt_err_disconn_th;
+	bool is_bssid_hint_priority;
 	bool is_force_1x1;
+	uint16_t num_11b_tx_chains;
+	uint16_t num_11ag_tx_chains;
+	uint32_t scan_probe_repeat_time;
+	uint32_t scan_num_probes;
 } tCsrConfigParam;
 
 /* Tush */
@@ -1497,16 +1503,12 @@ typedef struct tagCsrSummaryStatsInfo {
 } tCsrSummaryStatsInfo;
 
 typedef struct tagCsrGlobalClassAStatsInfo {
-	uint32_t rx_frag_cnt;
-	uint32_t promiscuous_rx_frag_cnt;
-	/* uint32_t rx_fcs_err; */
-	uint32_t rx_input_sensitivity;
+	uint32_t nss;
 	uint32_t max_pwr;
-	/* uint32_t default_pwr; */
-	uint32_t sync_fail_cnt;
 	uint32_t tx_rate;
 	/* mcs index for HT20 and HT40 rates */
 	uint32_t mcs_index;
+	uint32_t mcs_rate_flags;
 	/* to diff between HT20 & HT40 rates;short & long guard interval */
 	uint32_t tx_rate_flags;
 
@@ -1623,7 +1625,7 @@ typedef struct tagCsrTdlsSendMgmt {
 	uint32_t peerCapability;
 	uint8_t *buf;
 	uint8_t len;
-
+	enum sir_wifi_traffic_ac ac;
 } tCsrTdlsSendMgmt;
 #endif
 

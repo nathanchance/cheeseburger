@@ -1388,6 +1388,11 @@ __wlan_hdd_cfg80211_ll_stats_get(struct wiphy *wiphy,
 
 	LinkLayerStatsGetReq.staId = pAdapter->sessionId;
 
+	if (wlan_hdd_validate_session_id(pAdapter->sessionId)) {
+		hdd_err("invalid session id: %d", pAdapter->sessionId);
+		return -EINVAL;
+	}
+
 	context = &ll_stats_context;
 	spin_lock(&context->context_lock);
 	context->request_id = LinkLayerStatsGetReq.reqId;
@@ -1829,7 +1834,6 @@ static int __wlan_hdd_cfg80211_get_station(struct wiphy *wiphy,
 	if (pAdapter->hdd_stats.summary_stat.rssi)
 		pAdapter->rssi = pAdapter->hdd_stats.summary_stat.rssi;
 
-        //hdd_err("pAdapter->rssi =: %d", pAdapter->rssi);
 	/* for new connection there might be no valid previous RSSI */
 	if (!pAdapter->rssi) {
 		hdd_get_rssi_snr_by_bssid(pAdapter,
@@ -1862,13 +1866,16 @@ static int __wlan_hdd_cfg80211_get_station(struct wiphy *wiphy,
 	/* convert to the UI units of 100kbps */
 	myRate = pAdapter->hdd_stats.ClassA_stat.tx_rate * 5;
 	if (!(rate_flags & eHAL_TX_RATE_LEGACY)) {
-		nss = pAdapter->hdd_stats.ClassA_stat.rx_frag_cnt;
+		nss = pAdapter->hdd_stats.ClassA_stat.nss;
 
 		if (eHDD_LINK_SPEED_REPORT_ACTUAL == pCfg->reportMaxLinkSpeed) {
 			/* Get current rate flags if report actual */
-			rate_flags =
-				pAdapter->hdd_stats.ClassA_stat.
-				promiscuous_rx_frag_cnt;
+			/* WMA fails to find mcs_index for legacy tx rates */
+			if (mcs_index == INVALID_MCS_IDX && myRate)
+				rate_flags = eHAL_TX_RATE_LEGACY;
+			else
+				rate_flags =
+				 pAdapter->hdd_stats.ClassA_stat.mcs_rate_flags;
 		}
 
 		if (mcs_index == INVALID_MCS_IDX)

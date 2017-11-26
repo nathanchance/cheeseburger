@@ -57,6 +57,7 @@
 
 #define LIM_GET_NOISE_MAX_TRY 5
 
+#ifdef FEATURE_WLAN_ESE
 /**
  * get_local_power_constraint_probe_response() - extracts local constraint
  * from probe response
@@ -66,18 +67,31 @@
  *
  * Return: None
  */
-#ifdef FEATURE_WLAN_ESE
 static void get_local_power_constraint_probe_response(
 		tpSirProbeRespBeacon beacon_struct,
 		int8_t *local_constraint,
 		tpPESession session)
 {
-	if (beacon_struct->eseTxPwr.present) {
+	if (beacon_struct->eseTxPwr.present)
 		*local_constraint =
 			beacon_struct->eseTxPwr.power_limit;
+}
+
+/**
+ * get_ese_version_ie_probe_response() - extracts ESE version IE
+ * from probe response
+ * @beacon_struct: beacon structure
+ * @session: A pointer to session entry.
+ *
+ * Return: None
+ */
+static void get_ese_version_ie_probe_response(tpAniSirGlobal mac_ctx,
+					tpSirProbeRespBeacon beacon_struct,
+					tpPESession session)
+{
+	if (mac_ctx->roam.configParam.isEseIniFeatureEnabled)
 		session->is_ese_version_ie_present =
 			beacon_struct->is_ese_ver_ie_present;
-	}
 }
 #else
 static void get_local_power_constraint_probe_response(
@@ -86,6 +100,12 @@ static void get_local_power_constraint_probe_response(
 		tpPESession session)
 {
 
+}
+
+static inline void get_ese_version_ie_probe_response(tpAniSirGlobal mac_ctx,
+					tpSirProbeRespBeacon beacon_struct,
+					tpPESession session)
+{
 }
 #endif
 
@@ -123,6 +143,105 @@ static uint8_t lim_get_nss_supported_by_beacon(tpSchBeaconStruct bcn,
 }
 
 /**
+ * lim_check_vendor_ap_present() - checks if the Vendor OUIs are present
+ * in the IE buffer
+ *
+ * @mac_ctx:       mac context.
+ * @ie:            ie buffer
+ * @ie_len:        length of ie buffer
+ * @beacon_struct: pointer to beacon structure
+ * @session:       pointer to pe session
+ *
+ * This function parses the IE buffer and finds if any of the vendor OUI
+ * is present in it.
+ *
+ * Return: true if the vendor OUI is present, else false
+ */
+static bool
+lim_check_vendor_ap_present(tpAniSirGlobal mac_ctx, uint8_t *ie,
+			    uint16_t ie_len, tpSchBeaconStruct beacon_struct,
+			    tpPESession session)
+{
+	uint8_t *ptr = NULL;
+	uint8_t elem_len;
+	uint8_t elem_data[SIR_MAC_VENDOR_AP_2_DATA_LEN];
+
+	/*
+	 * for SIR_MAC_VENDOR_AP_1_OUI, check for Vendor OUI and if it is 2x2
+	 */
+	if ((cfg_get_vendor_ie_ptr_from_oui(mac_ctx, SIR_MAC_VENDOR_AP_1_OUI,
+	    SIR_MAC_VENDOR_AP_1_OUI_LEN, ie, ie_len)) &&
+	    (lim_get_nss_supported_by_beacon(beacon_struct,
+	    session) == 2)) {
+		lim_log(mac_ctx, LOG1, FL(
+			"In lim_check_vendor_ap_present match Vendor AP 1"));
+		sir_dump_buf(mac_ctx, SIR_LIM_MODULE_ID, LOG1,
+				SIR_MAC_VENDOR_AP_1_OUI,
+				SIR_MAC_VENDOR_AP_1_OUI_LEN);
+		return true;
+	}
+
+	/*
+	 * for SIR_MAC_VENDOR_AP_2_OUI check for Vendor OUI, Vendor IE Data
+	 * and if it is 2x2
+	 */
+	ptr = cfg_get_vendor_ie_ptr_from_oui(mac_ctx,
+					     SIR_MAC_VENDOR_AP_2_OUI,
+					     SIR_MAC_VENDOR_AP_2_OUI_LEN,
+					     ie, ie_len);
+	if (!ptr)
+		goto vendor3;
+
+	elem_len = ptr[1];
+	qdf_mem_copy(&elem_data, &ptr[2 + SIR_MAC_VENDOR_AP_2_OUI_LEN],
+			SIR_MAC_VENDOR_AP_2_DATA_LEN);
+	/*
+	 * Byte 2 of Vendor IE data might change dynamically, masking it
+	 */
+	elem_data[1] |= 0xFF;
+
+	if ((lim_get_nss_supported_by_beacon(beacon_struct,
+	     session) == 2) && (elem_len == (SIR_MAC_VENDOR_AP_2_OUI_LEN +
+	     SIR_MAC_VENDOR_AP_2_DATA_LEN)) &&
+	     ((qdf_mem_cmp(&elem_data, SIR_MAC_VENDOR_AP_2_DATA,
+	     SIR_MAC_VENDOR_AP_2_DATA_LEN) == 0) ||
+	     (qdf_mem_cmp(&elem_data, SIR_MAC_VENDOR_AP_2_DATA_2,
+	     SIR_MAC_VENDOR_AP_2_DATA_LEN) == 0))) {
+		lim_log(mac_ctx, LOG1, FL(
+			"In lim_check_vendor_ap_present match Vendor AP 2"));
+		sir_dump_buf(mac_ctx, SIR_LIM_MODULE_ID, LOG1,
+				SIR_MAC_VENDOR_AP_2_OUI,
+				SIR_MAC_VENDOR_AP_2_OUI_LEN);
+		lim_log(mac_ctx, LOG1, FL(
+			"Verifying vendor IE Data "MAC_ADDRESS_STR),
+			MAC_ADDR_ARRAY(&ptr[2 + SIR_MAC_VENDOR_AP_2_OUI_LEN]));
+		return true;
+	}
+
+vendor3:
+	/*
+	 * for SIR_MAC_VENDOR_AP_3_OUI, check if VENDOR AP 3 IE is present and
+	 * if Vendor AP 4 IE is not present and if it is 4x4 11ac
+	 */
+	if (beacon_struct->VHTCaps.present &&
+	    (lim_get_nss_supported_by_beacon(beacon_struct,
+	    session) == 4) &&
+	    (cfg_get_vendor_ie_ptr_from_oui(mac_ctx, SIR_MAC_VENDOR_AP_3_OUI,
+	    SIR_MAC_VENDOR_AP_3_OUI_LEN, ie, ie_len)) &&
+	    !(cfg_get_vendor_ie_ptr_from_oui(mac_ctx, SIR_MAC_VENDOR_AP_4_OUI,
+	    SIR_MAC_VENDOR_AP_4_OUI_LEN, ie, ie_len))) {
+		lim_log(mac_ctx, LOG1, FL(
+			"In lim_check_vendor_ap_present match Vendor AP 3"));
+		sir_dump_buf(mac_ctx, SIR_LIM_MODULE_ID, LOG1,
+					SIR_MAC_VENDOR_AP_3_OUI,
+					SIR_MAC_VENDOR_AP_3_OUI_LEN);
+		return true;
+	}
+
+	return false;
+}
+
+/**
  * lim_extract_ap_capability() - extract AP's HCF/WME/WSM capability
  * @mac_ctx: Pointer to Global MAC structure
  * @p_ie: Pointer to starting IE in Beacon/Probe Response
@@ -148,6 +267,7 @@ lim_extract_ap_capability(tpAniSirGlobal mac_ctx, uint8_t *p_ie,
 	tSirRetStatus cfg_get_status = eSIR_FAILURE;
 	uint8_t ap_bcon_ch_width;
 	bool new_ch_width_dfn = false;
+	bool is_vendor_ap_present;
 	tDot11fIEVHTOperation *vht_op;
 	uint8_t fw_vht_ch_wd;
 	uint8_t vht_ch_wd;
@@ -174,17 +294,31 @@ lim_extract_ap_capability(tpAniSirGlobal mac_ctx, uint8_t *p_ie,
 		return;
 	}
 
+	is_vendor_ap_present = lim_check_vendor_ap_present(mac_ctx, p_ie,
+							   ie_len,
+							   beacon_struct,
+							   session);
+
 	if (mac_ctx->roam.configParam.is_force_1x1 &&
-		cfg_get_vendor_ie_ptr_from_oui(mac_ctx, SIR_MAC_VENDOR_AP_1_OUI,
-				SIR_MAC_VENDOR_AP_1_OUI_LEN, p_ie, ie_len) &&
-		lim_get_nss_supported_by_beacon(beacon_struct, session) == 2) {
+		is_vendor_ap_present &&
+		mac_ctx->lteCoexAntShare &&
+		IS_24G_CH(session->currentOperChannel)) {
 		session->supported_nss_1x1 = true;
 		session->vdev_nss = 1;
 		session->nss = 1;
-		lim_log(mac_ctx, LOGE, FL("For special ap, NSS: %d"), session->nss);
-		//pr_debug("For special ap, NSS: %d", session->nss);
+		lim_log(mac_ctx, LOGE, FL("For special ap, NSS: %d"),
+			session->nss);
 	}
 
+	if (session->nss > lim_get_nss_supported_by_beacon(beacon_struct,
+	    session)) {
+		session->nss = lim_get_nss_supported_by_beacon(beacon_struct,
+							       session);
+		session->vdev_nss = session->nss;
+	}
+
+	if (session->nss == 1)
+		session->supported_nss_1x1 = true;
 
 	if (beacon_struct->wmeInfoPresent ||
 	    beacon_struct->wmeEdcaPresent ||
@@ -360,6 +494,9 @@ lim_extract_ap_capability(tpAniSirGlobal mac_ctx, uint8_t *p_ie,
 				beacon_struct, local_constraint, session);
 		}
 	}
+
+	get_ese_version_ie_probe_response(mac_ctx, beacon_struct, session);
+
 	session->country_info_present = false;
 	/* Initializing before first use */
 	if (beacon_struct->countryInfoPresent)

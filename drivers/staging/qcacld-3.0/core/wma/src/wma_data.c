@@ -1627,7 +1627,8 @@ int wma_mcc_vdev_tx_pause_evt_handler(void *handle, uint8_t *event,
 	/* FW mapped vdev from ID
 	 * vdev_map = (1 << vdev_id)
 	 * So, host should unmap to ID */
-	for (vdev_id = 0; vdev_map != 0; vdev_id++) {
+	for (vdev_id = 0; vdev_map != 0 && vdev_id < wma->max_bssid;
+	     vdev_id++) {
 		if (!(vdev_map & 0x1)) {
 			/* No Vdev */
 		} else {
@@ -2173,7 +2174,7 @@ int wma_ibss_peer_info_event_handler(void *handle, uint8_t *data,
 
 	/*sanity check */
 	if ((num_peers > 32) || (NULL == peer_info)) {
-		WMA_LOGE("%s: Invalid event data from target num_peers %d peer_info %p",
+		WMA_LOGE("%s: Invalid event data from target num_peers %d peer_info %pK",
 			__func__, num_peers, peer_info);
 		status = 1;
 		goto send_response;
@@ -2259,7 +2260,7 @@ int wma_fast_tx_fail_event_handler(void *handle, uint8_t *data,
 	if (NULL != wma->hddTxFailCb) {
 		wma->hddTxFailCb(peer_mac, tx_fail_cnt);
 	} else {
-		WMA_LOGE("%s: HDD callback is %p", __func__, wma->hddTxFailCb);
+		WMA_LOGE("%s: HDD callback is %pK", __func__, wma->hddTxFailCb);
 	}
 
 	return 0;
@@ -2418,8 +2419,17 @@ int wmi_desc_pool_init(tp_wma_handle wma_handle, uint32_t pool_size)
  */
 void wmi_desc_pool_deinit(tp_wma_handle wma_handle)
 {
+	struct wmi_desc_t *wmi_desc;
+	uint8_t i;
+
 	qdf_spin_lock_bh(&wma_handle->wmi_desc_pool.wmi_desc_pool_lock);
 	if (wma_handle->wmi_desc_pool.array) {
+		for (i = 0; i < wma_handle->wmi_desc_pool.pool_size; i++) {
+			wmi_desc = (struct wmi_desc_t *)
+				    (&wma_handle->wmi_desc_pool.array[i]);
+			if (wmi_desc && wmi_desc->nbuf)
+				cds_packet_free(wmi_desc->nbuf);
+		}
 		qdf_mem_free(wma_handle->wmi_desc_pool.array);
 		wma_handle->wmi_desc_pool.array = NULL;
 	} else {
@@ -2433,6 +2443,9 @@ void wmi_desc_pool_deinit(tp_wma_handle wma_handle)
 	qdf_spinlock_destroy(&wma_handle->wmi_desc_pool.wmi_desc_pool_lock);
 }
 
+/* WMI MGMT TX wake lock timeout in milli seconds */
+#define WMI_MGMT_TX_WAKE_LOCK_DURATION 300
+
 /**
  * wmi_desc_get() - Get wmi descriptor from wmi free descriptor pool
  * @wma_handle: handle to wma
@@ -2442,6 +2455,7 @@ void wmi_desc_pool_deinit(tp_wma_handle wma_handle)
 struct wmi_desc_t *wmi_desc_get(tp_wma_handle wma_handle)
 {
 	struct wmi_desc_t *wmi_desc = NULL;
+	uint16_t num_free;
 
 	qdf_spin_lock_bh(&wma_handle->wmi_desc_pool.wmi_desc_pool_lock);
 	if (wma_handle->wmi_desc_pool.freelist) {
@@ -2449,8 +2463,19 @@ struct wmi_desc_t *wmi_desc_get(tp_wma_handle wma_handle)
 		wmi_desc = &wma_handle->wmi_desc_pool.freelist->wmi_desc;
 		wma_handle->wmi_desc_pool.freelist =
 			wma_handle->wmi_desc_pool.freelist->next;
+
+		qdf_wake_lock_timeout_acquire(&wma_handle->wow_wake_lock,
+					      WMI_MGMT_TX_WAKE_LOCK_DURATION);
+
+		num_free = wma_handle->wmi_desc_pool.num_free;
 	}
 	qdf_spin_unlock_bh(&wma_handle->wmi_desc_pool.wmi_desc_pool_lock);
+
+	if (wmi_desc)
+		WMA_LOGD("%s: num_free %d desc_id %d",
+			 __func__, num_free, wmi_desc->desc_id);
+	else
+		WMA_LOGE("%s: WMI descriptors are exhausted", __func__);
 
 	return wmi_desc;
 }
@@ -2464,12 +2489,77 @@ struct wmi_desc_t *wmi_desc_get(tp_wma_handle wma_handle)
  */
 void wmi_desc_put(tp_wma_handle wma_handle, struct wmi_desc_t *wmi_desc)
 {
+	uint16_t num_free;
+
 	qdf_spin_lock_bh(&wma_handle->wmi_desc_pool.wmi_desc_pool_lock);
 	((union wmi_desc_elem_t *)wmi_desc)->next =
 		wma_handle->wmi_desc_pool.freelist;
 	wma_handle->wmi_desc_pool.freelist = (union wmi_desc_elem_t *)wmi_desc;
 	wma_handle->wmi_desc_pool.num_free++;
+
+	if (wma_handle->wmi_desc_pool.num_free ==
+	    wma_handle->wmi_desc_pool.pool_size)
+		qdf_wake_lock_release(&wma_handle->wow_wake_lock,
+				      WIFI_POWER_EVENT_WAKELOCK_MGMT_TX);
+
+	num_free = wma_handle->wmi_desc_pool.num_free;
+
 	qdf_spin_unlock_bh(&wma_handle->wmi_desc_pool.wmi_desc_pool_lock);
+
+	WMA_LOGD("%s: num_free %d desc_id %d",
+		 __func__, num_free, wmi_desc->desc_id);
+}
+
+/**
+ * rate_pream: Mapping from data rates to preamble.
+ */
+static uint32_t rate_pream[] = {WMI_RATE_PREAMBLE_CCK, WMI_RATE_PREAMBLE_CCK,
+				WMI_RATE_PREAMBLE_CCK, WMI_RATE_PREAMBLE_CCK,
+				WMI_RATE_PREAMBLE_OFDM, WMI_RATE_PREAMBLE_OFDM,
+				WMI_RATE_PREAMBLE_OFDM, WMI_RATE_PREAMBLE_OFDM,
+				WMI_RATE_PREAMBLE_OFDM, WMI_RATE_PREAMBLE_OFDM,
+				WMI_RATE_PREAMBLE_OFDM, WMI_RATE_PREAMBLE_OFDM};
+
+/**
+ * rate_mcs: Mapping from data rates to MCS (+4 for OFDM to keep the sequence).
+ */
+static uint32_t rate_mcs[] = {WMI_MAX_CCK_TX_RATE_1M, WMI_MAX_CCK_TX_RATE_2M,
+			      WMI_MAX_CCK_TX_RATE_5_5M, WMI_MAX_CCK_TX_RATE_11M,
+			      WMI_MAX_OFDM_TX_RATE_6M + 4,
+			      WMI_MAX_OFDM_TX_RATE_9M + 4,
+			      WMI_MAX_OFDM_TX_RATE_12M + 4,
+			      WMI_MAX_OFDM_TX_RATE_18M + 4,
+			      WMI_MAX_OFDM_TX_RATE_24M + 4,
+			      WMI_MAX_OFDM_TX_RATE_36M + 4,
+			      WMI_MAX_OFDM_TX_RATE_48M + 4,
+			      WMI_MAX_OFDM_TX_RATE_54M + 4};
+
+#define WMA_TX_SEND_MGMT_TYPE 0
+#define WMA_TX_SEND_DATA_TYPE 1
+
+/**
+ * wma_update_tx_send_params() - Update tx_send_params TLV info
+ * @tx_param: Pointer to tx_send_params
+ * @rid: rate ID passed by PE
+ *
+ * Return: None
+ */
+static void wma_update_tx_send_params(struct tx_send_params *tx_param,
+				      enum rateid rid)
+{
+	uint8_t  preamble = 0, nss = 0, rix = 0;
+
+	preamble = rate_pream[rid];
+	rix = rate_mcs[rid];
+
+	tx_param->mcs_mask = (1 << rix);
+	tx_param->nss_mask = (1 << nss);
+	tx_param->preamble_type = (1 << preamble);
+	tx_param->frame_type = WMA_TX_SEND_MGMT_TYPE;
+
+	WMA_LOGD(FL("rate_id: %d, mcs: %0x, nss: %0x, preamble: %0x"),
+		     rid, tx_param->mcs_mask, tx_param->nss_mask,
+		     tx_param->preamble_type);
 }
 
 /**
@@ -2496,7 +2586,8 @@ QDF_STATUS wma_tx_packet(void *wma_context, void *tx_frame, uint16_t frmLen,
 			 eFrameType frmType, eFrameTxDir txDir, uint8_t tid,
 			 pWMATxRxCompFunc tx_frm_download_comp_cb, void *pData,
 			 pWMAAckFnTxComp tx_frm_ota_comp_cb, uint8_t tx_flag,
-			 uint8_t vdev_id, bool tdlsFlag, uint16_t channel_freq)
+			 uint8_t vdev_id, bool tdlsFlag, uint16_t channel_freq,
+			 enum rateid rid)
 {
 	tp_wma_handle wma_handle = (tp_wma_handle) (wma_context);
 	int32_t status;
@@ -2857,23 +2948,41 @@ QDF_STATUS wma_tx_packet(void *wma_context, void *tx_frame, uint16_t frmLen,
 		mgmt_param.pdata = pData;
 		mgmt_param.chanfreq = chanfreq;
 		mgmt_param.qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
+		/*
+		 * Update the tx_params TLV only for rates
+		 * other than 1Mbps and 6 Mbps
+		 */
+		if (rid < RATEID_DEFAULT &&
+		    (rid != RATEID_1MBPS && rid != RATEID_6MBPS)) {
+			WMA_LOGD(FL("using rate id: %d for Tx"), rid);
+			mgmt_param.tx_params_valid = true;
+			wma_update_tx_send_params(&mgmt_param.tx_param, rid);
+		}
+
 		wmi_desc = wmi_desc_get(wma_handle);
 		if (!wmi_desc) {
-			WMA_LOGE("%s: Failed to get wmi_desc", __func__);
+			/* Countinous failure can cause flooding of logs */
+			if (!qdf_do_mod(wma_handle->wmi_desc_fail_count,
+				MAX_PRINT_FAILURE_CNT))
+				WMA_LOGE("%s: Failed to get wmi_desc",
+					__func__);
+			else
+				WMA_LOGD("%s: Failed to get wmi_desc",
+					__func__);
+
+			wma_handle->wmi_desc_fail_count++;
 			status = QDF_STATUS_E_FAILURE;
 		} else {
 			mgmt_param.desc_id = wmi_desc->desc_id;
 			wmi_desc->vdev_id = vdev_id;
+			wmi_desc->nbuf = tx_frame;
+			wmi_desc->tx_cmpl_cb = tx_frm_download_comp_cb;
+			wmi_desc->ota_post_proc_cb = tx_frm_ota_comp_cb;
 			status = wmi_mgmt_unified_cmd_send(
 					wma_handle->wmi_handle,
 					&mgmt_param);
-			if (status) {
+			if (status)
 				wmi_desc_put(wma_handle, wmi_desc);
-			} else {
-				wmi_desc->nbuf = tx_frame;
-				wmi_desc->tx_cmpl_cb = tx_frm_download_comp_cb;
-				wmi_desc->ota_post_proc_cb = tx_frm_ota_comp_cb;
-			}
 		}
 	} else {
 		/* Hand over the Tx Mgmt frame to TxRx */
@@ -2890,7 +2999,11 @@ QDF_STATUS wma_tx_packet(void *wma_context, void *tx_frame, uint16_t frmLen,
 			tx_frm_download_comp_cb(wma_handle->mac_context,
 						tx_frame,
 						WMA_TX_FRAME_BUFFER_FREE);
-		WMA_LOGP("%s: Failed to send Mgmt Frame", __func__);
+		if (!qdf_do_mod(wma_handle->tx_fail_cnt, MAX_PRINT_FAILURE_CNT))
+			WMA_LOGE("%s: Failed to send Mgmt Frame", __func__);
+		else
+			WMA_LOGD("%s: Failed to send Mgmt Frame", __func__);
+		wma_handle->tx_fail_cnt++;
 		goto error;
 	}
 
@@ -3058,7 +3171,7 @@ void wma_tx_abort(uint8_t vdev_id)
 
 	iface = &wma->interfaces[vdev_id];
 	if (!iface->handle) {
-		WMA_LOGE("%s: Failed to get iface handle: %p",
+		WMA_LOGE("%s: Failed to get iface handle: %pK",
 			 __func__, iface->handle);
 		return;
 	}

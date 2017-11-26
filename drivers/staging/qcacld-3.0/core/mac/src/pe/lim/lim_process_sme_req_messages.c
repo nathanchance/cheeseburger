@@ -466,7 +466,7 @@ static uint16_t __lim_get_sme_join_req_size_for_alloc(uint8_t *pBuf)
 
 	pBuf += sizeof(uint16_t);
 	len = lim_get_u16(pBuf);
-	return len + sizeof(uint16_t);
+	return len;
 }
 
 /**
@@ -558,6 +558,7 @@ static bool __lim_process_sme_sys_ready_ind(tpAniSirGlobal pMac, uint32_t *pMsgB
 		ready_req->pe_roam_synch_cb = pe_roam_synch_callback;
 		pe_register_callbacks_with_wma(pMac, ready_req);
 		pMac->lim.add_bssdescr_callback = ready_req->add_bssdescr_cb;
+		pMac->lim.sme_msg_callback = ready_req->sme_msg_cb;
 	}
 	PELOGW(lim_log(pMac, LOGW, FL("sending WMA_SYS_READY_IND msg to HAL"));)
 	MTRACE(mac_trace_msg_tx(pMac, NO_SESSION, msg.type));
@@ -1293,6 +1294,9 @@ static QDF_STATUS lim_send_hal_start_scan_offload_req(tpAniSirGlobal pMac,
 	pScanOffloadReq->scanType = pScanReq->scanType;
 	pScanOffloadReq->minChannelTime = pScanReq->minChannelTime;
 	pScanOffloadReq->maxChannelTime = pScanReq->maxChannelTime;
+	pScanOffloadReq->scan_num_probes = pScanReq->scan_num_probes;
+	pScanOffloadReq->scan_probe_repeat_time =
+		pScanReq->scan_probe_repeat_time;
 	pScanOffloadReq->restTime = pScanReq->restTime;
 	pScanOffloadReq->min_rest_time = pScanReq->min_rest_time;
 	pScanOffloadReq->idle_time = pScanReq->idle_time;
@@ -1669,8 +1673,13 @@ __lim_process_sme_join_req(tpAniSirGlobal mac_ctx, uint32_t *msg_buf)
 		session->limWmeEnabled = sme_join_req->isWMEenabled;
 		session->limQosEnabled = sme_join_req->isQosEnabled;
 		session->wps_registration = sme_join_req->wps_registration;
+
 		session->enable_bcast_probe_rsp =
 				sme_join_req->enable_bcast_probe_rsp;
+
+		/* Update supplicant configured ignore assoc disallowed */
+		session->ignore_assoc_disallowed =
+				sme_join_req->ignore_assoc_disallowed;
 		/* Store vendor specfic IE for CISCO AP */
 		ie_len = (bss_desc->length + sizeof(bss_desc->length) -
 			 GET_FIELD_OFFSET(tSirBssDescription, ieFields));
@@ -3709,11 +3718,8 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 	       )
 
 	if (!LIM_IS_STA_ROLE(psessionEntry)) {
-		PELOGE(lim_log(pMac, LOGE, "AddTs received on AP - ignoring");)
-		lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
-				       psessionEntry, pSirAddts->req.tspec,
-				       smesessionId, smetransactionId);
-		return;
+		pe_err("AddTs received on AP - ignoring");
+		goto send_failure_addts_rsp;
 	}
 
 	pStaDs =
@@ -3721,22 +3727,14 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 				   &psessionEntry->dph.dphHashTable);
 
 	if (pStaDs == NULL) {
-		PELOGE(lim_log
-			       (pMac, LOGE, "Cannot find AP context for addts req");
-		       )
-		lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
-				       psessionEntry, pSirAddts->req.tspec,
-				       smesessionId, smetransactionId);
-		return;
+		pe_err("Cannot find AP context for addts req");
+		goto send_failure_addts_rsp;
 	}
 
 	if ((!pStaDs->valid) || (pStaDs->mlmStaContext.mlmState !=
 	    eLIM_MLM_LINK_ESTABLISHED_STATE)) {
-		lim_log(pMac, LOGE, "AddTs received in invalid MLM state");
-		lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
-				       psessionEntry, pSirAddts->req.tspec,
-				       smesessionId, smetransactionId);
-		return;
+		pe_err("AddTs received in invalid MLM state");
+		goto send_failure_addts_rsp;
 	}
 
 	pSirAddts->req.wsmTspecPresent = 0;
@@ -3752,13 +3750,8 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 	else if (pStaDs->lleEnabled)
 		pSirAddts->req.lleTspecPresent = 1;
 	else {
-		PELOGW(lim_log
-			       (pMac, LOGW, FL("ADDTS_REQ ignore - qos is disabled"));
-		       )
-		lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
-				       psessionEntry, pSirAddts->req.tspec,
-				       smesessionId, smetransactionId);
-		return;
+		pe_warn("ADDTS_REQ ignore - qos is disabled");
+		goto send_failure_addts_rsp;
 	}
 
 	if ((psessionEntry->limSmeState != eLIM_SME_ASSOCIATED_STATE) &&
@@ -3766,10 +3759,7 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 		lim_log(pMac, LOGE,
 			"AddTs received in invalid LIMsme state (%d)",
 			psessionEntry->limSmeState);
-		lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
-				       psessionEntry, pSirAddts->req.tspec,
-				       smesessionId, smetransactionId);
-		return;
+		goto send_failure_addts_rsp;
 	}
 
 	if (pMac->lim.gLimAddtsSent) {
@@ -3779,10 +3769,7 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 			pMac->lim.gLimAddtsReq.req.tspec.tsinfo.traffic.tsid,
 			pMac->lim.gLimAddtsReq.req.tspec.tsinfo.traffic.
 			userPrio);
-		lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
-				       psessionEntry, pSirAddts->req.tspec,
-				       smesessionId, smetransactionId);
-		return;
+		goto send_failure_addts_rsp;
 	}
 
 	sir_copy_mac_addr(peerMac, psessionEntry->bssId);
@@ -3804,21 +3791,21 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 		lim_log(pMac, LOGP,
 			FL("Unable to get Cfg param %d (Addts Rsp Timeout)"),
 			WNI_CFG_ADDTS_RSP_TIMEOUT);
-		return;
+		goto send_failure_addts_rsp;
 	}
 
 	timeout = SYS_MS_TO_TICKS(timeout);
 	if (tx_timer_change(&pMac->lim.limTimers.gLimAddtsRspTimer, timeout, 0)
 	    != TX_SUCCESS) {
-		lim_log(pMac, LOGP, FL("AddtsRsp timer change failed!"));
-		return;
+		pe_err("AddtsRsp timer change failed!");
+		goto send_failure_addts_rsp;
 	}
 	pMac->lim.gLimAddtsRspTimerCount++;
 	if (tx_timer_change_context(&pMac->lim.limTimers.gLimAddtsRspTimer,
 				    pMac->lim.gLimAddtsRspTimerCount) !=
 	    TX_SUCCESS) {
-		lim_log(pMac, LOGP, FL("AddtsRsp timer change failed!"));
-		return;
+		pe_err("AddtsRsp timer change failed!");
+		goto send_failure_addts_rsp;
 	}
 	MTRACE(mac_trace
 		       (pMac, TRACE_CODE_TIMER_ACTIVATE, psessionEntry->peSessionId,
@@ -3828,10 +3815,15 @@ static void __lim_process_sme_addts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
 	pMac->lim.limTimers.gLimAddtsRspTimer.sessionId = sessionId;
 	if (tx_timer_activate(&pMac->lim.limTimers.gLimAddtsRspTimer) !=
 	    TX_SUCCESS) {
-		lim_log(pMac, LOGP, FL("AddtsRsp timer activation failed!"));
-		return;
+		pe_err("AddtsRsp timer activation failed!");
+		goto send_failure_addts_rsp;
 	}
 	return;
+
+send_failure_addts_rsp:
+	lim_send_sme_addts_rsp(pMac, pSirAddts->rspReqd, eSIR_FAILURE,
+			       psessionEntry, pSirAddts->req.tspec,
+			       smesessionId, smetransactionId);
 }
 
 static void __lim_process_sme_delts_req(tpAniSirGlobal pMac, uint32_t *pMsgBuf)
@@ -4096,16 +4088,16 @@ static void lim_process_sme_update_config(tpAniSirGlobal mac_ctx,
 {
 	tpPESession pe_session;
 
-	pr_debug("received eWNI_SME_UPDATE_HT_CONFIG message");
+	pe_debug("received eWNI_SME_UPDATE_HT_CONFIG message");
 	if (msg == NULL) {
-		pr_err("Buffer is Pointing to NULL");
+		pe_err("Buffer is Pointing to NULL");
 		return;
 	}
 
 	pe_session = pe_find_session_by_sme_session_id(mac_ctx,
 						       msg->sme_session_id);
 	if (pe_session == NULL) {
-		pr_warn("Session does not exist for given BSSID");
+		pe_warn("Session does not exist for given BSSID");
 		return;
 	}
 
@@ -5771,9 +5763,21 @@ lim_update_ibss_prop_add_ies(tpAniSirGlobal pMac, uint8_t **pDstData_buff,
 		qdf_mem_copy(vendor_ie, pModifyIE->pIEBuffer,
 				pModifyIE->ieBufferlength);
 	} else {
-		uint16_t new_length = pModifyIE->ieBufferlength + *pDstDataLen;
-		uint8_t *new_ptr = qdf_mem_malloc(new_length);
+		uint16_t new_length;
+		uint8_t *new_ptr;
 
+		/*
+		 * check for uint16 overflow before using sum of two numbers as
+		 * length of size to malloc
+		 */
+		if (USHRT_MAX - pModifyIE->ieBufferlength < *pDstDataLen) {
+			pe_err("U16 overflow due to %d + %d",
+				pModifyIE->ieBufferlength, *pDstDataLen);
+			return false;
+		}
+
+		new_length = pModifyIE->ieBufferlength + *pDstDataLen;
+		new_ptr = qdf_mem_malloc(new_length);
 		if (NULL == new_ptr) {
 			lim_log(pMac, LOGE, FL("Memory allocation failed."));
 			return false;
@@ -5948,8 +5952,18 @@ static void lim_process_update_add_ies(tpAniSirGlobal mac_ctx,
 		if (update_ie->append) {
 			/*
 			 * In case of append, allocate new memory
-			 * with combined length
+			 * with combined length.
+			 * Multiple back to back append commands
+			 * can lead to a huge length.So, check
+			 * for the validity of the length.
 			 */
+			if (addn_ie->probeRespDataLen >
+				(USHRT_MAX - update_ie->ieBufferlength)) {
+				pe_err("IE Length overflow, curr:%d, new:%d",
+					addn_ie->probeRespDataLen,
+					update_ie->ieBufferlength);
+				goto end;
+			}
 			new_length = update_ie->ieBufferlength +
 				addn_ie->probeRespDataLen;
 			new_ptr = qdf_mem_malloc(new_length);
@@ -6289,6 +6303,14 @@ static void lim_process_nss_update_request(tpAniSirGlobal mac_ctx,
 	/* populate nss field in the beacon */
 	session_entry->gLimOperatingMode.present = 1;
 	session_entry->gLimOperatingMode.rxNSS = nss_update_req_ptr->new_nss;
+	session_entry->gLimOperatingMode.chanWidth = session_entry->ch_width;
+
+	if ((nss_update_req_ptr->new_nss == NSS_1x1_MODE) &&
+			(session_entry->ch_width > CH_WIDTH_80MHZ))
+		session_entry->gLimOperatingMode.chanWidth = CH_WIDTH_80MHZ;
+
+	pe_debug("ch width %hu", session_entry->gLimOperatingMode.chanWidth);
+
 	/* Send nss update request from here */
 	if (sch_set_fixed_beacon_fields(mac_ctx, session_entry) !=
 			eSIR_SUCCESS) {

@@ -50,8 +50,8 @@
 #endif /* FEATURE_WLAN_DIAG_SUPPORT */
 
 #include "csr_inside_api.h"
-
 #include "rrm_global.h"
+#include "wma.h"
 
 
 /* Roam score for a neighbor AP will be calculated based on the below definitions.
@@ -174,10 +174,11 @@ sme_rrm_send_beacon_report_xmit_ind(tpAniSirGlobal mac_ctx,
 	tpSirBssDescription bss_desc = NULL;
 	tpSirBeaconReportXmitInd beacon_rep;
 	uint16_t length, ie_len, tot_len;
-	uint8_t  i = 0, j = 0;
+	uint8_t  i = 0, j = 0, counter = 0;
 	tCsrScanResultInfo *cur_result = NULL;
 	QDF_STATUS status = QDF_STATUS_E_FAILURE;
 	tpRrmSMEContext rrm_ctx = &mac_ctx->rrm.rrmSmeContext;
+	tpSirBssDescription bss_desc_to_free[SIR_BCN_REPORT_MAX_BSS_DESC] = {0};
 
 	if (NULL == result_arr && !msrmnt_status) {
 		sms_log(mac_ctx, LOGE, "Beacon report xmit Ind to PE Failed");
@@ -220,6 +221,8 @@ sme_rrm_send_beacon_report_xmit_ind(tpAniSirGlobal mac_ctx,
 			qdf_mem_copy(
 				&beacon_rep->pBssDescription[i]->ieFields[0],
 				bss_desc->ieFields, ie_len);
+			bss_desc_to_free[i] =
+				beacon_rep->pBssDescription[i];
 			sms_log(mac_ctx, LOG1,
 				".RRM Result Bssid = " MAC_ADDRESS_STR
 				" chan= %d, rssi = -%d",
@@ -227,7 +230,7 @@ sme_rrm_send_beacon_report_xmit_ind(tpAniSirGlobal mac_ctx,
 				beacon_rep->pBssDescription[i]->bssId),
 				beacon_rep->pBssDescription[i]->channelId,
 				beacon_rep->pBssDescription[i]->rssi * (-1));
-				beacon_rep->numBssDesc++;
+			beacon_rep->numBssDesc++;
 			if (++i >= SIR_BCN_REPORT_MAX_BSS_DESC)
 				break;
 			cur_result =
@@ -251,6 +254,9 @@ sme_rrm_send_beacon_report_xmit_ind(tpAniSirGlobal mac_ctx,
 			"SME Sending BcnRepXmit to PE numBss %d i %d j %d",
 			beacon_rep->numBssDesc, i, j);
 		status = cds_send_mb_message_to_mac(beacon_rep);
+		if (status != QDF_STATUS_SUCCESS)
+			for (counter = 0; counter < i; ++counter)
+				qdf_mem_free(bss_desc_to_free[counter]);
 	} while (cur_result);
 
 	return status;
@@ -649,7 +655,7 @@ static QDF_STATUS sme_rrm_issue_scan_req(tpAniSirGlobal mac_ctx)
 	tCsrScanRequest scan_req;
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
 	tpRrmSMEContext sme_rrm_ctx = &mac_ctx->rrm.rrmSmeContext;
-	uint32_t session_id;
+	uint32_t session_id, scan_req_id;
 	uint32_t max_chan_time;
 	tSirScanType scan_type;
 	uint64_t current_time;
@@ -764,6 +770,8 @@ static QDF_STATUS sme_rrm_issue_scan_req(tpAniSirGlobal mac_ctx)
 				sme_rrm_ctx->currentIndex]);
 		/* set requestType to full scan */
 		scan_req.requestType = eCSR_SCAN_REQUEST_FULL_SCAN;
+		wma_get_scan_id(&scan_req_id);
+		scan_req.scan_id = scan_req_id;
 		status = sme_scan_request(mac_ctx, (uint8_t) session_id,
 					&scan_req,
 					&sme_rrm_scan_request_callback, NULL);

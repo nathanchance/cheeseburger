@@ -554,9 +554,14 @@
 #define SIR_MAC_MAX_NUMBER_OF_RATES          12
 #define SIR_MAC_MAX_NUM_OF_DEFAULT_KEYS      4
 #define SIR_MAC_KEY_LENGTH                   13 /* WEP Maximum key length size */
-#define SIR_MAC_AUTH_CHALLENGE_LENGTH        128
+#define SIR_MAC_AUTH_CHALLENGE_LENGTH        253
+#define SIR_MAC_SAP_AUTH_CHALLENGE_LENGTH    128
 #define SIR_MAC_WEP_IV_LENGTH                4
 #define SIR_MAC_WEP_ICV_LENGTH               4
+#define SIR_MAC_CHALLENGE_ID_LEN             2
+
+/* 2 bytes each for auth algo number, transaction number and status code */
+#define SIR_MAC_AUTH_FRAME_INFO_LEN          6
 
 /* / MAX key length when ULA is used */
 #define SIR_MAC_MAX_KEY_LENGTH               32
@@ -612,6 +617,20 @@
 
 #define SIR_MAC_VENDOR_AP_1_OUI             "\x00\x0C\x43"
 #define SIR_MAC_VENDOR_AP_1_OUI_LEN         3
+
+#define SIR_MAC_VENDOR_AP_2_OUI             "\x00\x10\x18"
+#define SIR_MAC_VENDOR_AP_2_OUI_LEN         3
+
+#define SIR_MAC_VENDOR_AP_2_DATA            "\x02\xFF\xF0\x2C\x00\x00"
+#define SIR_MAC_VENDOR_AP_2_DATA_2          "\x02\xFF\x04\x0C\x00\x00"
+#define SIR_MAC_VENDOR_AP_2_DATA_LEN        6
+
+#define SIR_MAC_VENDOR_AP_3_OUI             "\x00\x03\x7F"
+#define SIR_MAC_VENDOR_AP_3_OUI_LEN         3
+
+#define SIR_MAC_VENDOR_AP_4_OUI             "\x8C\xFD\xF0"
+#define SIR_MAC_VENDOR_AP_4_OUI_LEN         3
+
 /* / Status Code (present in Management response frames) enum */
 
 typedef enum eSirMacStatusCodes {

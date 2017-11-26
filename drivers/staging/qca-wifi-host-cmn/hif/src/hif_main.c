@@ -145,12 +145,6 @@ bool hif_can_suspend_link(struct hif_opaque_softc *hif_ctx)
 	return scn->linkstate_vote == 0;
 }
 
-#ifndef CONFIG_WIN
-#define QCA9984_HOST_INTEREST_ADDRESS -1
-#define QCA9888_HOST_INTEREST_ADDRESS -1
-#define IPQ4019_HOST_INTEREST_ADDRESS -1
-#endif
-
 /**
  * hif_hia_item_address(): hif_hia_item_address
  * @target_type: target_type
@@ -729,6 +723,11 @@ int hif_get_device_type(uint32_t device_id,
 		ret = -ENODEV;
 		break;
 	}
+
+	if (*target_type == TARGET_TYPE_UNKNOWN) {
+		HIF_ERROR("%s: Unsupported target_type!", __func__);
+		ret = -ENODEV;
+	}
 end:
 	return ret;
 }
@@ -981,6 +980,23 @@ bool hif_is_recovery_in_progress(struct hif_softc *scn)
 
 	if (cbk && cbk->is_recovery_in_progress)
 		return cbk->is_recovery_in_progress(cbk->context);
+
+	return false;
+}
+
+/**
+ * hif_is_target_ready() - API to query if target is in ready state
+ * progress
+ * @scn: HIF Context
+ *
+ * Return: True/False
+ */
+bool hif_is_target_ready(struct hif_softc *scn)
+{
+	struct hif_driver_state_callbacks *cbk = hif_get_callbacks_handle(scn);
+
+	if (cbk && cbk->is_target_ready)
+		return cbk->is_target_ready(cbk->context);
 
 	return false;
 }

@@ -1526,7 +1526,7 @@ void qdf_net_buf_debug_add_node(qdf_nbuf_t net_buf, size_t size,
 	p_node = qdf_net_buf_debug_look_up(net_buf);
 
 	if (p_node) {
-		qdf_print("Double allocation of skb ! Already allocated from %p %s %d current alloc from %p %s %d",
+		qdf_print("Double allocation of skb ! Already allocated from %pK %s %d current alloc from %pK %s %d",
 			  p_node->net_buf, p_node->file_name, p_node->line_num,
 			  net_buf, file_name, line_num);
 		qdf_nbuf_track_free(new_node);
@@ -1596,7 +1596,7 @@ done:
 	spin_unlock_irqrestore(&g_qdf_net_buf_track_lock[i], irq_flag);
 
 	if (!found) {
-		qdf_print("Unallocated buffer ! Double free of net_buf %p ?",
+		qdf_print("Unallocated buffer ! Double free of net_buf %pK ?",
 			  net_buf);
 		QDF_ASSERT(0);
 	} else {
@@ -1736,7 +1736,21 @@ static uint8_t __qdf_nbuf_get_tso_cmn_seg_info(qdf_device_t osdev,
 		qdf_assert(0);
 		return 1;
 	}
-	tso_info->ip_tcp_hdr_len = tso_info->eit_hdr_len - tso_info->l2_len;
+
+	if (tso_info->ethproto == htons(ETH_P_IP)) {
+		/* inlcude IPv4 header length for IPV4 (total length) */
+		tso_info->ip_tcp_hdr_len =
+			tso_info->eit_hdr_len - tso_info->l2_len;
+	} else if (tso_info->ethproto == htons(ETH_P_IPV6)) {
+		/* exclude IPv6 header length for IPv6 (payload length) */
+		tso_info->ip_tcp_hdr_len = tcp_hdrlen(skb);
+	}
+	/*
+	 * The length of the payload (application layer data) is added to
+	 * tso_info->ip_tcp_hdr_len before passing it on to the msdu link ext
+	 * descriptor.
+	 */
+
 	TSO_DEBUG("%s seq# %u eit hdr len %u l2 len %u  skb len %u\n", __func__,
 		tso_info->tcp_seq_num,
 		tso_info->eit_hdr_len,
@@ -1816,7 +1830,7 @@ static inline void __qdf_nbuf_fill_tso_cmn_seg_info(
 	curr_seg->seg.total_len = curr_seg->seg.tso_frags[0].length;
 	curr_seg->seg.tso_frags[0].paddr = tso_cmn_info->eit_hdr_dma_map_addr;
 
-	TSO_DEBUG("%s %d eit hdr %p eit_hdr_len %d tcp_seq_num %u tso_info->total_len %u\n",
+	TSO_DEBUG("%s %d eit hdr %pK eit_hdr_len %d tcp_seq_num %u tso_info->total_len %u\n",
 		   __func__, __LINE__, tso_cmn_info->eit_hdr,
 		   tso_cmn_info->eit_hdr_len,
 		   curr_seg->seg.tso_flags.tcp_seq_num,
@@ -1901,41 +1915,61 @@ uint32_t __qdf_nbuf_get_tso_info(qdf_device_t osdev, struct sk_buff *skb,
 			return tso_info->num_segs;
 
 		curr_seg->seg.tso_flags.ip_len = tso_cmn_info.ip_tcp_hdr_len;
+		/* frag len is added to ip_len in while loop below*/
+
 		curr_seg->seg.num_frags++;
 
 		while (more_tso_frags) {
-			curr_seg->seg.tso_frags[i].vaddr = tso_frag_vaddr;
-			curr_seg->seg.tso_frags[i].length = tso_frag_len;
-			curr_seg->seg.total_len += tso_frag_len;
-			curr_seg->seg.tso_flags.ip_len +=  tso_frag_len;
-			curr_seg->seg.num_frags++;
-			skb_proc = skb_proc - tso_frag_len;
+			if (tso_frag_len > 0) {
+				curr_seg->seg.tso_frags[i].vaddr =
+							tso_frag_vaddr;
+				curr_seg->seg.tso_frags[i].length =
+							tso_frag_len;
+				curr_seg->seg.total_len += tso_frag_len;
+				curr_seg->seg.tso_flags.ip_len += tso_frag_len;
+				curr_seg->seg.num_frags++;
+				skb_proc = skb_proc - tso_frag_len;
 
-			/* increment the TCP sequence number */
-			tso_cmn_info.tcp_seq_num += tso_frag_len;
-			curr_seg->seg.tso_frags[i].paddr = tso_frag_paddr;
-			TSO_DEBUG("%s[%d] frag %d frag len %d total_len %u vaddr %p\n",
-				__func__, __LINE__,
-				i,
-				tso_frag_len,
-				curr_seg->seg.total_len,
-				curr_seg->seg.tso_frags[i].vaddr);
+				/* increment the TCP sequence number */
+				tso_cmn_info.tcp_seq_num += tso_frag_len;
+				curr_seg->seg.tso_frags[i].paddr =
+								tso_frag_paddr;
+				TSO_DEBUG("%s[%d] frag %d frag len %d "
+					"total_len %u vaddr %pK\n",
+					__func__, __LINE__,
+					i,
+					tso_frag_len,
+					curr_seg->seg.total_len,
+					curr_seg->seg.tso_frags[i].vaddr);
 
-			/* if there is no more data left in the skb */
-			if (!skb_proc)
-				return tso_info->num_segs;
+				/* if there is no more data left in the skb */
+				if (!skb_proc)
+					return tso_info->num_segs;
 
-			/* get the next payload fragment information */
-			/* check if there are more fragments in this segment */
-			if (tso_frag_len < tso_seg_size) {
-				tso_seg_size = tso_seg_size - tso_frag_len;
-				more_tso_frags = 1;
-				i++;
-			} else {
-				more_tso_frags = 0;
-				/* reset i and the tso payload size */
-				i = 1;
-				tso_seg_size = skb_shinfo(skb)->gso_size;
+				/* get the next payload fragment information */
+				/* check if there are more fragments in this segment */
+				if (tso_frag_len < tso_seg_size) {
+					tso_seg_size = tso_seg_size - tso_frag_len;
+					more_tso_frags = 1;
+					i++;
+					if (curr_seg->seg.num_frags ==
+								FRAG_NUM_MAX) {
+						more_tso_frags = 0;
+						/*
+						 * reset i and the tso
+						 * payload size
+						 */
+						i = 1;
+						tso_seg_size =
+							skb_shinfo(skb)->
+								gso_size;
+					}
+				} else {
+					more_tso_frags = 0;
+					/* reset i and the tso payload size */
+					i = 1;
+					tso_seg_size = skb_shinfo(skb)->gso_size;
+				}
 			}
 
 			/* if the next fragment is contiguous */
@@ -2063,17 +2097,91 @@ EXPORT_SYMBOL(__qdf_nbuf_unmap_tso_segment);
  */
 uint32_t __qdf_nbuf_get_tso_num_seg(struct sk_buff *skb)
 {
-	uint32_t gso_size, tmp_len, num_segs = 0;
+	uint32_t tso_seg_size = skb_shinfo(skb)->gso_size;
+	uint32_t remainder, num_segs = 0;
+	uint8_t skb_nr_frags = skb_shinfo(skb)->nr_frags;
+	uint8_t frags_per_tso = 0;
+	uint32_t skb_frag_len = 0;
+	uint32_t eit_hdr_len = (skb_transport_header(skb)
+			 - skb_mac_header(skb)) + tcp_hdrlen(skb);
+	struct skb_frag_struct *frag = NULL;
+	int j = 0;
+	uint32_t temp_num_seg = 0;
 
-	gso_size = skb_shinfo(skb)->gso_size;
-	tmp_len = skb->len - ((skb_transport_header(skb) - skb_mac_header(skb))
-		+ tcp_hdrlen(skb));
-	while (tmp_len) {
-		num_segs++;
-		if (tmp_len > gso_size)
-			tmp_len -= gso_size;
+	/* length of the first chunk of data in the skb minus eit header*/
+	skb_frag_len = skb_headlen(skb) - eit_hdr_len;
+
+	/* Calculate num of segs for skb's first chunk of data*/
+	remainder = skb_frag_len % tso_seg_size;
+	num_segs = skb_frag_len / tso_seg_size;
+	/**
+	 * Remainder non-zero and nr_frags zero implies end of skb data.
+	 * In that case, one more tso seg is required to accommodate
+	 * remaining data, hence num_segs++. If nr_frags is non-zero,
+	 * then remaining data will be accomodated while doing the calculation
+	 * for nr_frags data. Hence, frags_per_tso++.
+	 */
+	if (remainder) {
+		if (!skb_nr_frags)
+			num_segs++;
 		else
-			break;
+			frags_per_tso++;
+	}
+
+	while (skb_nr_frags) {
+		if (j >= skb_shinfo(skb)->nr_frags) {
+			qdf_print("TSO: nr_frags %d j %d\n",
+			skb_shinfo(skb)->nr_frags, j);
+			qdf_assert(0);
+			return 0;
+		}
+		/**
+		 * Calculate the number of tso seg for nr_frags data:
+		 * Get the length of each frag in skb_frag_len, add to
+		 * remainder.Get the number of segments by dividing it to
+		 * tso_seg_size and calculate the new remainder.
+		 * Decrement the nr_frags value and keep
+		 * looping all the skb_fragments.
+		 */
+		frag = &skb_shinfo(skb)->frags[j];
+		skb_frag_len = skb_frag_size(frag);
+		temp_num_seg = num_segs;
+		remainder += skb_frag_len;
+		num_segs += remainder / tso_seg_size;
+		remainder = remainder % tso_seg_size;
+		skb_nr_frags--;
+		if (remainder) {
+			if (num_segs > temp_num_seg)
+				frags_per_tso = 0;
+			/**
+			 * increment the tso per frags whenever remainder is
+			 * positive. If frags_per_tso reaches the (max-1),
+			 * [First frags always have EIT header, therefore max-1]
+			 * increment the num_segs as no more data can be
+			 * accomodated in the curr tso seg. Reset the remainder
+			 * and frags per tso and keep looping.
+			 */
+			frags_per_tso++;
+			if (frags_per_tso == FRAG_NUM_MAX - 1) {
+				num_segs++;
+				frags_per_tso = 0;
+				remainder = 0;
+			}
+			/**
+			 * If this is the last skb frag and still remainder is
+			 * non-zero(frags_per_tso is not reached to the max-1)
+			 * then increment the num_segs to take care of the
+			 * remaining length.
+			 */
+			if (!skb_nr_frags && remainder) {
+				num_segs++;
+				frags_per_tso = 0;
+			}
+		} else {
+			 /* Whenever remainder is 0, reset the frags_per_tso. */
+			frags_per_tso = 0;
+		}
+		j++;
 	}
 	return num_segs;
 }
@@ -2518,6 +2626,7 @@ static unsigned int qdf_nbuf_update_radiotap_vht_flags(
 		IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH;
 	put_unaligned_le16(vht_flags, &rtap_buf[rtap_len]);
 	rtap_len += 2;
+
 	rtap_buf[rtap_len] |=
 		(rx_status->is_stbc ?
 		 IEEE80211_RADIOTAP_VHT_FLAG_STBC : 0) |
@@ -2526,8 +2635,8 @@ static unsigned int qdf_nbuf_update_radiotap_vht_flags(
 		 IEEE80211_RADIOTAP_VHT_FLAG_LDPC_EXTRA_OFDM_SYM : 0) |
 		(rx_status->beamformed ?
 		 IEEE80211_RADIOTAP_VHT_FLAG_BEAMFORMED : 0);
-
 	rtap_len += 1;
+
 	rtap_buf[rtap_len] = (rx_status->vht_flag_values2);
 	rtap_len += 1;
 	rtap_buf[rtap_len] = (rx_status->vht_flag_values3[0]);
@@ -2587,11 +2696,15 @@ unsigned int qdf_nbuf_update_radiotap(struct mon_rx_status *rx_status,
 	rtap_len += 1;
 
 	/* IEEE80211_RADIOTAP_RATE  u8           500kb/s */
-	rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_RATE);
-	rtap_buf[rtap_len] = rx_status->rate;
+	if (!rx_status->ht_flags && !rx_status->vht_flags) {
+		rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_RATE);
+		rtap_buf[rtap_len] = rx_status->rate;
+	} else
+		rtap_buf[rtap_len] = 0;
 	rtap_len += 1;
-	rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_CHANNEL);
+
 	/* IEEE80211_RADIOTAP_CHANNEL 2 x __le16   MHz, bitmap */
+	rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_CHANNEL);
 	put_unaligned_le16(rx_status->chan_freq, &rtap_buf[rtap_len]);
 	rtap_len += 2;
 	/* Channel flags. */
@@ -2614,6 +2727,25 @@ unsigned int qdf_nbuf_update_radiotap(struct mon_rx_status *rx_status,
 	rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_ANTENNA);
 	rtap_buf[rtap_len] = rx_status->nr_ant;
 	rtap_len += 1;
+
+	if (rx_status->ht_flags) {
+		/* IEEE80211_RADIOTAP_VHT u8, u8, u8 */
+		rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_MCS);
+		rtap_buf[rtap_len] = IEEE80211_RADIOTAP_MCS_HAVE_BW |
+					IEEE80211_RADIOTAP_MCS_HAVE_MCS |
+					IEEE80211_RADIOTAP_MCS_HAVE_GI;
+		rtap_len += 1;
+
+		if (rx_status->sgi)
+			rtap_buf[rtap_len] |= IEEE80211_RADIOTAP_MCS_SGI;
+		if (rx_status->bw)
+			rtap_buf[rtap_len] |= IEEE80211_RADIOTAP_MCS_BW_40;
+		rtap_len += 1;
+
+		rtap_buf[rtap_len] = rx_status->mcs;
+		rtap_len += 1;
+	}
+
 	if (rx_status->vht_flags) {
 		/* IEEE80211_RADIOTAP_VHT u16, u8, u8, u8[4], u8, u8, u16 */
 		rthdr->it_present |= cpu_to_le32(1 << IEEE80211_RADIOTAP_VHT);

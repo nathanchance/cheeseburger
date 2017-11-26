@@ -674,23 +674,25 @@ rrm_process_beacon_report_req(tpAniSirGlobal pMac,
 
 	pSmeBcnReportReq->channelList.numChannels = num_channels;
 	if (pBeaconReq->measurement_request.Beacon.num_APChannelReport) {
-		uint8_t *pChanList =
-			pSmeBcnReportReq->channelList.channelNumber;
+		uint8_t *ch_lst = pSmeBcnReportReq->channelList.channelNumber;
+		uint8_t len;
+		uint16_t ch_ctr = 0;
 		for (num_APChanReport = 0;
 		     num_APChanReport <
 		     pBeaconReq->measurement_request.Beacon.num_APChannelReport;
 		     num_APChanReport++) {
-			qdf_mem_copy(pChanList,
-				     pBeaconReq->measurement_request.Beacon.
-				     APChannelReport[num_APChanReport].
-				     channelList,
-				     pBeaconReq->measurement_request.Beacon.
-				     APChannelReport[num_APChanReport].
-				     num_channelList);
+			len = pBeaconReq->measurement_request.Beacon.
+			    APChannelReport[num_APChanReport].num_channelList;
+			if (ch_ctr + len >
+			   sizeof(pSmeBcnReportReq->channelList.channelNumber))
+				break;
 
-			pChanList +=
-				pBeaconReq->measurement_request.Beacon.
-				APChannelReport[num_APChanReport].num_channelList;
+			qdf_mem_copy(&ch_lst[ch_ctr],
+				     pBeaconReq->measurement_request.Beacon.
+				     APChannelReport[num_APChanReport].
+				     channelList, len);
+
+			ch_ctr += len;
 		}
 	}
 	/* Send request to SME. */
@@ -802,7 +804,7 @@ rrm_process_beacon_report_xmit(tpAniSirGlobal mac_ctx,
 	tpSirBssDescription bss_desc;
 	tpRRMReq curr_req = mac_ctx->rrm.rrmPEContext.pCurrentReq;
 	tpPESession session_entry;
-	uint8_t session_id;
+	uint8_t session_id, counter;
 	uint8_t bss_desc_count = 0;
 
 	lim_log(mac_ctx, LOG1, FL("Received beacon report xmit indication"));
@@ -816,7 +818,8 @@ rrm_process_beacon_report_xmit(tpAniSirGlobal mac_ctx,
 	if (NULL == curr_req) {
 		lim_log(mac_ctx, LOGE,
 			FL("Received report xmit while there is no request pending in PE"));
-		return eSIR_FAILURE;
+		status = eSIR_FAILURE;
+		goto end;
 	}
 
 	if ((beacon_xmit_ind->numBssDesc) || curr_req->sendEmptyBcnRpt) {
@@ -827,16 +830,20 @@ rrm_process_beacon_report_xmit(tpAniSirGlobal mac_ctx,
 		session_entry = pe_find_session_by_bssid(mac_ctx,
 				beacon_xmit_ind->bssId, &session_id);
 		if (NULL == session_entry) {
-			lim_log(mac_ctx, LOGE, FL("session does not exist for given bssId"));
-			return eSIR_FAILURE;
+			lim_log(mac_ctx, LOGE,
+				FL("session does not exist for given bssId"));
+			status = eSIR_FAILURE;
+			goto end;
 		}
 
 		report = qdf_mem_malloc(beacon_xmit_ind->numBssDesc *
 			 sizeof(*report));
 
 		if (NULL == report) {
-			lim_log(mac_ctx, LOGE, FL("RRM Report is NULL, allocation failed"));
-			return eSIR_MEM_ALLOC_FAILED;
+			lim_log(mac_ctx, LOGE,
+				FL("RRM Report is NULL, allocation failed"));
+			status = eSIR_MEM_ALLOC_FAILED;
+			goto end;
 		}
 
 		for (bss_desc_count = 0; bss_desc_count <
@@ -918,8 +925,7 @@ rrm_process_beacon_report_xmit(tpAniSirGlobal mac_ctx,
 				break;
 			}
 		}
-
-		lim_log(mac_ctx, LOG1, FL("Sending Action frame with %d bss info"),
+		pe_info("Sending Action frame with %d bss info",
 			bss_desc_count);
 		lim_send_radio_measure_report_action_frame(mac_ctx,
 			curr_req->dialog_token, bss_desc_count, report,
@@ -927,6 +933,10 @@ rrm_process_beacon_report_xmit(tpAniSirGlobal mac_ctx,
 
 		curr_req->sendEmptyBcnRpt = false;
 	}
+
+end:
+	for (counter = 0; counter < beacon_xmit_ind->numBssDesc; counter++)
+		qdf_mem_free(beacon_xmit_ind->pBssDescription[counter]);
 
 	if (beacon_xmit_ind->fMeasureDone) {
 		lim_log(mac_ctx, LOG3, FL("Measurement done....cleanup the context"));
